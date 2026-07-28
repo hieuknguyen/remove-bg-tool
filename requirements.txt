@@ -1,0 +1,9 @@
+# Thư viện cần cho remove_bg.py
+# Cài: python3 -m pip install -r requirements.txt
+
+rembg>=2.0.77          # tách nền bằng AI (kéo theo onnxruntime)
+numpy>=2.0
+pillow>=10.0
+
+onnxruntime>=1.17      # ghi rõ để chắc chắn có bản CPU, chạy được cả Intel lẫn Apple Silicon
+pymatting>=1.1         # chỉ cần khi dùng cờ --matting
