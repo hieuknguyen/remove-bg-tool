@@ -24,18 +24,38 @@ import remove_bg
 
 HERE = Path(__file__).resolve().parent
 
-# Các chế độ xử lý, khớp với menu của xoa-nen.bat / xoa-nen.command
+# Các chế độ xử lý, khớp với menu của xoa-nen.bat / xoa-nen.command.
+# Mục ĐẦU TIÊN là mặc định khi mở giao diện.
+#
+# Lưu ý về ngưỡng bright_low/bright_high: hai loại ảnh cần thiết lập NGƯỢC NHAU.
+#   - Đồ thủy tinh trong suốt trên nền tối: cần ngưỡng THẤP, vì kính trong đặt
+#     trên nền đen thì trong ảnh gần như chính là màu đen; ngưỡng cao sẽ khoét
+#     thủng cái ly/dĩa thành lỗ chỗ.
+#   - Vật thể phát sáng, lấp lánh: cần ngưỡng CAO, nếu không quầng sáng mờ sẽ bị
+#     coi là đục và giữ nguyên màu tối -> viền đen bẩn.
 MODES = [
+    ("Đồ thủy tinh / vật thể trong suốt  (dĩa, ly, chai trên nền tối)",
+     dict(model="u2net")),
     ("Chi tiết bay ở trên + đáy sạch  (tia sáng, vật thể tối màu)",
      dict(keep_bright=True, bright_above="auto")),
-    ("Tự động - tự nhận biết nền đơn sắc",
-     dict(auto=True)),
     ("Giữ chi tiết bay trên toàn ảnh  (nền tối/đơn sắc)",
      dict(keep_bright=True)),
+    ("Tự động - tự nhận biết nền đơn sắc",
+     dict(auto=True)),
     ("Xóa nền + làm sạch viền",
      dict(clean=True)),
     ("Xóa nền thường  (chỉ dùng AI)",
      dict()),
+]
+
+# Model AI. Chon model quan trong hon chinh cac nguong mau, vi neu model da nhin
+# ra vat the thi khong can den mat na mau nua.
+MODELS = [
+    ("(theo chế độ ở trên)", None),
+    ("birefnet-general - tốt cho chi tiết bay (tim, tia nước, lấp lánh)", "birefnet-general"),
+    ("u2net - nhìn ra đồ thủy tinh trong suốt, nhanh nhất", "u2net"),
+    ("isnet-general-use - nhanh, nhưng hay để lại vệt xám", "isnet-general-use"),
+    ("birefnet-massive - chất lượng cao, chậm gấp ~50 lần u2net", "birefnet-massive"),
 ]
 
 
@@ -114,6 +134,13 @@ class App:
         for i, (label, _) in enumerate(MODES):
             ttk.Radiobutton(box, text=label, variable=self.mode_var,
                             value=i).grid(row=i, column=0, sticky="w", pady=1)
+
+        row = ttk.Frame(box)
+        row.grid(row=len(MODES), column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(row, text="Model AI:").pack(side="left")
+        self.model_var = tk.StringVar(value=MODELS[0][0])
+        ttk.Combobox(row, textvariable=self.model_var, state="readonly", width=58,
+                     values=[m[0] for m in MODELS]).pack(side="left", padx=(6, 0))
 
         # --- Cắt khung ---
         box = ttk.LabelFrame(main, text="Cắt khung", padding=8)
@@ -217,6 +244,11 @@ class App:
         kw["input"] = self.in_var.get()
         kw["output"] = self.out_var.get()
         kw["overwrite"] = self.overwrite_var.get()
+
+        # Chon model tay thi de len tren model cua che do
+        chosen = dict(MODELS).get(self.model_var.get())
+        if chosen is not None:
+            kw["model"] = chosen
 
         if self.crop_var.get():
             kw["crop"] = True

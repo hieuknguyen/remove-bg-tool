@@ -5,9 +5,17 @@
 # Cach dung: bo anh vao thu muc "input" roi nhay doi vao file nay trong Finder.
 # Lan dau tien phai cap quyen chay:   chmod +x xoa-nen.command
 #
-# Che do co dinh: giu chi tiet bay o phia tren (tia sang, lap lanh, vat the lo
-# lung) + cat sat chu the co chua le deu. Muon doi thi sua bien OPT ben duoi,
-# hoac truyen them co khi goi tu Terminal:  ./xoa-nen.command --pad 10
+# Che do co dinh: model u2net + cat sat chu the chua le.
+#
+# CHON MODEL quan trong hon chinh cac nguong mau:
+#   u2net            - nhin ra do thuy tinh trong suot (dia, ly, chai), nhanh nhat.
+#   birefnet-general - giu chi tiet bay (tim, tia nuoc, lap lanh) tot hon nhieu,
+#                      NHUNG khong nhin ra do thuy tinh trong suot.
+# Anh co chi tiet bay thi doi sang:
+#   OPT="-m birefnet-general --keep-bright --bright-above auto"
+#
+# Muon doi thi sua bien OPT ben duoi, hoac truyen them co khi goi tu Terminal:
+#   ./xoa-nen.command --pad 10
 
 set -e
 
@@ -16,14 +24,13 @@ cd "$(dirname "$0")"
 
 PY=".venv/bin/python3"
 
-# Che do mac dinh: [5] chi tiet bay o tren + day sach, kem [1] cat sat chua le
-OPT="--keep-bright --bright-above auto"
+OPT="-m u2net"
 CROP="--crop"
 
 echo "============================================"
 echo "   TOOL XOA NEN ANH"
 echo "============================================"
-echo "   Che do: chi tiet bay o tren + cat sat chua le"
+echo "   Che do: do thuy tinh / vat the trong suot + cat sat chua le"
 echo
 
 # --- Dung moi truong Python neu chua co -------------------------------------

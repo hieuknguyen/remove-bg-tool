@@ -3,15 +3,21 @@ chcp 65001 >nul
 cd /d "%~dp0"
 set PY=.venv\Scripts\python.exe
 
-rem Che do co dinh: [5] giu chi tiet bay o phia tren + [1] cat sat chua le deu.
+rem Che do co dinh: model u2net + cat sat chua le deu.
+rem CHON MODEL quan trong hon chinh cac nguong mau:
+rem   u2net            - nhin ra do thuy tinh trong suot (dia, ly, chai), nhanh nhat
+rem   birefnet-general - giu chi tiet bay (tim, tia nuoc, lap lanh) tot hon nhieu,
+rem                      NHUNG khong nhin ra do thuy tinh trong suot
+rem Anh co chi tiet bay thi doi dong OPT thanh:
+rem   set OPT=-m birefnet-general --keep-bright --bright-above auto
 rem Muon doi thi sua 2 dong duoi, hoac truyen them co:  xoa-nen.bat --pad 10
-set OPT=--keep-bright --bright-above auto
+set OPT=-m u2net
 set CROP=--crop
 
 echo ============================================
 echo    TOOL XOA NEN ANH
 echo ============================================
-echo    Che do: chi tiet bay o tren + cat sat chua le
+echo    Che do: do thuy tinh / vat the trong suot + cat sat chua le
 echo.
 
 if not exist "%PY%" (
