@@ -34,19 +34,10 @@ if [ ! -x "$PY" ]; then
   echo
 fi
 
-# --- tkinter co san khong? --------------------------------------------------
-# Python cai qua Homebrew thuong THIEU tkinter, phai cai them goi rieng.
-if ! "$PY" -c "import tkinter" >/dev/null 2>&1; then
-  echo
-  echo "[LOI] Ban Python nay thieu tkinter nen khong mo duoc giao dien."
-  echo "      Cach xu ly:"
-  echo "        brew install python-tk"
-  echo "      roi xoa thu muc .venv va chay lai file nay."
-  echo
-  echo "      Hoac dung ban khong giao dien:  ./xoa-nen.command"
-  echo
-  read -r -n 1 -p "Nhan phim bat ky de dong..."
-  exit 1
+# --- Tu chuan bi Qt khi nang cap tu giao dien cu -----------------------------
+if ! "$PY" -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('PySide6') else 1)" >/dev/null 2>&1; then
+  echo "Dang cai thu vien giao dien Qt..."
+  "$PY" -m pip install --only-binary=:all: -r requirements-ui.txt
 fi
 
 mkdir -p input output

@@ -32,6 +32,7 @@ Lần chạy đầu tiên sẽ tự tải model về (~ vài trăm MB), các l�
 """
 
 import argparse
+import gc
 import sys
 import time
 from pathlib import Path
@@ -44,11 +45,165 @@ except Exception:
     pass
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
+from gpu_runtime import (activate_runtime, runtime_info, cuda_algorithm_for,
+                         remember_cuda_algorithm)
+
+# Executable entry points prepare GPU dependencies before ONNX loads its DLLs.
+_bootstrap = argparse.ArgumentParser(add_help=False)
+_bootstrap.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto")
+_requested, _ = _bootstrap.parse_known_args() if __name__ == "__main__" else (argparse.Namespace(device="auto"), [])
+activate_runtime(install=__name__ == "__main__" and _requested.device != "cpu"
+                 and not any(flag in sys.argv for flag in ("-h", "--help")))
+import onnxruntime as ort
 from rembg import new_session, remove
 
 # Các định dạng ảnh đầu vào được hỗ trợ
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+
+
+GPU_PROVIDERS = ("CUDAExecutionProvider", "DmlExecutionProvider",
+                 "ROCMExecutionProvider", "CoreMLExecutionProvider")
+
+
+def device_label(provider=None):
+    info = runtime_info()
+    if provider == "CUDAExecutionProvider":
+        name = info["name"].replace("GeForce ", "").replace(" with Max-Q Design", "")
+        return f"GPU · {name}"
+    if provider in GPU_PROVIDERS:
+        return {"DmlExecutionProvider": "GPU · DirectML", "ROCMExecutionProvider": "GPU · AMD ROCm",
+                "CoreMLExecutionProvider": "GPU · Apple CoreML"}[provider]
+    if provider == "CPUExecutionProvider":
+        return "CPU · Đang xử lý"
+    if any(provider in ort.get_available_providers() for provider in GPU_PROVIDERS):
+        return "Tự động · Ưu tiên GPU"
+    return "CPU · Xử lý trên thiết bị"
+
+
+def create_inference_session(model, device="auto", log=print, on_device=None, sess_opts=None,
+                             cuda_algorithm=None, cpu_fallback=False):
+    """Prefer an initialized GPU provider, and report any CPU fallback explicitly."""
+    available = ort.get_available_providers()
+    candidates = [] if device == "cpu" else [provider for provider in GPU_PROVIDERS if provider in available]
+    info = runtime_info()
+    if device != "cpu":
+        for note in info.get("notes", []):
+            log(note)
+    for provider in candidates:
+        try:
+            options = sess_opts if sess_opts is not None else ort.SessionOptions()
+            provider_options = {}
+            if provider == "CUDAExecutionProvider":
+                if cuda_algorithm is None:
+                    cuda_algorithm = cuda_algorithm_for(model, ort.__version__)
+                ort.preload_dlls(directory="")
+                provider_options = {"device_id": info.get("device_id", 0),
+                                    # Start with the remembered working algorithm, or
+                                    # cuDNN fallback engines on a new GPU/model pair.
+                                    "cudnn_conv_algo_search": cuda_algorithm,
+                                    "cudnn_conv_use_max_workspace": "0",
+                                    "arena_extend_strategy": "kSameAsRequested"}
+                # Let CUDA allocate from available VRAM. A fixed 75% arena limit
+                # rejected larger models even while the GPU still had free memory.
+            elif provider == "DmlExecutionProvider":
+                options.enable_mem_pattern = False
+                options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                provider_options = {"device_id": 0}
+            elif provider == "CoreMLExecutionProvider":
+                provider_options = {"MLComputeUnits": "CPUAndGPU"}
+            if sess_opts is None:
+                options.intra_op_num_threads = 2
+                options.inter_op_num_threads = 1
+            session = new_session(model, sess_opts=options,
+                                  providers=[(provider, provider_options), "CPUExecutionProvider"])
+            if provider not in session.inner_session.get_providers():
+                del session
+                log(f"Không khởi tạo được {provider}; đang thử bộ xử lý tiếp theo.")
+                continue
+            session.inner_session.disable_fallback()
+            if provider == "CUDAExecutionProvider":
+                session._cuda_algorithm = cuda_algorithm
+                saved = [False]
+                def remember(model=model, algorithm=cuda_algorithm, saved=saved):
+                    if not saved[0]:
+                        remember_cuda_algorithm(model, ort.__version__, algorithm)
+                        saved[0] = True
+                session._on_cuda_success = remember
+            label = device_label(provider)
+            log(f"Suy luận AI: {label} ({provider}).")
+            if on_device is not None:
+                on_device(label)
+            return session, provider
+        except Exception as error:
+            log(f"GPU {provider} chưa dùng được: {error}")
+    if device == "gpu":
+        raise RuntimeError("Không có GPU tương thích đang hoạt động. Thử --device auto để cho phép dùng CPU.")
+    if device == "auto":
+        log("Chuyển sang CPU vì không có GPU sẵn sàng cho model này.")
+    elif cpu_fallback:
+        log("Suy luận AI: CPU (dự phòng sau lỗi GPU).")
+    else:
+        log("Suy luận AI: CPU (được chọn thủ công).")
+    session = new_session(model, sess_opts=sess_opts, providers=["CPUExecutionProvider"])
+    if on_device is not None:
+        on_device("CPU · Dự phòng" if device == "auto" or cpu_fallback
+                  else device_label("CPUExecutionProvider"))
+    return session, "CPUExecutionProvider"
+
+
+def is_memory_error(error):
+    """Recognize allocator failures even when the message omits the GPU name."""
+    message = str(error).lower()
+    if "available memory of" in message and "smaller than requested" in message:
+        return True
+    return any(token in message for token in (
+        "out of memory", "out_of_memory", "failed to allocate", "failure to allocate",
+        "memory allocation failed", "not enough memory", "bad_alloc", "resource_exhausted",
+        "cublas_status_alloc_failed", "cudnn_status_alloc_failed"))
+
+
+def is_gpu_error(error):
+    message = str(error).lower()
+    return (type(error).__module__.startswith(("cupy", "cupyx")) or is_memory_error(error)
+            or any(token in message for token in (
+        "cuda", "cudnn", "cublas", "cusolver", "cusparse", "cupy", "nvrtc",
+        "directml", "dml", "rocm", "hip", "coreml")))
+
+
+def is_cuda_plan_error(error):
+    message = str(error).lower()
+    return any(token in message for token in ("heuristic_query_failed", "cudnn frontend",
+                                              "cudnn_fe", "cudnn_status_not_supported"))
+
+
+def gpu_error_summary(error):
+    # ONNX errors can contain the entire graph. Keep the activity panel readable.
+    return str(error).splitlines()[0][:300]
+
+
+def create_image_processor(model, provider, device, log, on_device=None):
+    """Choose a real CUDA pixel pipeline; never label CPU filters as GPU work."""
+    if provider == "CUDAExecutionProvider":
+        try:
+            from gpu_images import CudaImages
+            processor = CudaImages(model, runtime_info().get("device_id", 0))
+            log("Tính toán ảnh: GPU (chuẩn bị ảnh, mặt nạ, giữ chi tiết, làm sạch viền, cắt và đổi kích thước).")
+            log("CPU đọc file đầu vào, lưu PNG và điều khiển giao diện.")
+            return processor
+        except Exception as error:
+            if device == "gpu":
+                raise RuntimeError(f"Chưa kích hoạt được xử lý ảnh CUDA: {error}") from error
+            log(f"Xử lý ảnh CUDA chưa sẵn sàng: {error}")
+    elif provider in GPU_PROVIDERS and device == "gpu":
+        raise RuntimeError("Xử lý ảnh hoàn toàn trên GPU hiện cần NVIDIA CUDA; GPU này chỉ chạy được model AI.")
+    if provider in GPU_PROVIDERS:
+        log("Suy luận AI dùng GPU; các phép tính chỉnh ảnh tạm dùng CPU.")
+        if on_device is not None:
+            on_device("GPU AI · CPU chỉnh ảnh")
+    else:
+        log("Tính toán ảnh: CPU.")
+    return None
 
 
 def subject_bottom(ai_alpha, min_frac=0.002):
@@ -362,6 +517,8 @@ def build_parser():
     ap.add_argument("-m", "--model", default="birefnet-general",
                     help="Model AI. birefnet-general = chất lượng cao nhất (mặc định); "
                          "u2net = nhanh; u2netp = nhẹ; isnet-general-use = tốt cho vật thể")
+    ap.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto",
+                    help="auto: ưu tiên GPU và dự phòng CPU (mặc định); gpu: bắt buộc GPU; cpu: chỉ dùng CPU")
     ap.add_argument("--bg", type=parse_bg, default=None,
                     help="Màu nền thay thế dạng R,G,B (vd 255,255,255 = trắng). "
                          "Bỏ trống = nền trong suốt.")
@@ -492,12 +649,13 @@ def apply_pipeline(original, result, opts, log=lambda _: None):
     return result
 
 
-def run_batch(opts, log=print, on_progress=None, should_stop=None):
+def run_batch(opts, log=print, on_progress=None, should_stop=None, on_device=None):
     """Xử lý cả thư mục. Dùng chung cho dòng lệnh và giao diện đồ họa.
 
     log         : hàm nhận một dòng chữ để hiển thị
     on_progress : hàm nhận (đã_xong, tổng_số, tên_ảnh) sau mỗi ảnh
     should_stop : hàm trả True khi người dùng bấm dừng -> ngưng giữa chừng
+    on_device   : hàm nhận tên bộ xử lý thực tế (GPU hoặc CPU)
 
     Trả về dict {ok, skipped, failed, stopped, seconds, output}.
     """
@@ -525,13 +683,16 @@ def run_batch(opts, log=print, on_progress=None, should_stop=None):
     log(f"Tìm thấy {len(images)} ảnh trong '{in_dir}'. Đang tải model (lần đầu có thể lâu)...")
 
     # Tạo session 1 lần rồi tái sử dụng cho mọi ảnh -> nhanh hơn nhiều
-    session = new_session(opts.model)
+    session, provider = create_inference_session(opts.model, opts.device, log, on_device)
+    image_processor = create_image_processor(opts.model, provider, opts.device, log, on_device)
+    cuda_algorithm = getattr(session, "_cuda_algorithm", "DEFAULT")
+    attempted_cuda_algorithms = {cuda_algorithm}
 
     kwargs = {}
     if opts.matting:
         kwargs.update(
             alpha_matting=True,
-            alpha_matting_foreground_threshold=270,
+            alpha_matting_foreground_threshold=240,
             alpha_matting_background_threshold=20,
             alpha_matting_erode_size=11,
         )
@@ -556,12 +717,60 @@ def run_batch(opts, log=print, on_progress=None, should_stop=None):
             try:
                 with Image.open(src) as im:
                     original = im.convert("RGBA")
-                    result = remove(original, session=session, **kwargs)
-                result = apply_pipeline(original, result, opts, log)
+                    while True:
+                        try:
+                            if image_processor is not None:
+                                result = image_processor.process(original, session, opts, log)
+                            else:
+                                original = ImageOps.exif_transpose(original)
+                                result = remove(original, session=session, **kwargs)
+                                remember = getattr(session, "_on_cuda_success", None)
+                                if remember is not None:
+                                    remember()
+                                result = apply_pipeline(original, result, opts, log)
+                            break
+                        except Exception as error:
+                            memory_error = is_memory_error(error)
+                            retry_cuda = (provider == "CUDAExecutionProvider"
+                                          and len(attempted_cuda_algorithms) < 2
+                                          and not memory_error
+                                          and is_cuda_plan_error(error))
+                            if not retry_cuda and not (provider in GPU_PROVIDERS
+                                    and opts.device == "auto" and is_gpu_error(error)):
+                                raise
+                            if memory_error:
+                                log("GPU không đủ bộ nhớ để chạy model này.")
+                            else:
+                                log(f"GPU gặp lỗi: {gpu_error_summary(error)}")
+                        # Release the failed session after leaving the exception handler:
+                        # its traceback can otherwise retain all GPU allocations.
+                        session = None
+                        gc.collect()
+                        if image_processor is not None:
+                            image_processor.release_cache()
+                        if retry_cuda:
+                            cuda_algorithm = ("DEFAULT" if cuda_algorithm == "EXHAUSTIVE"
+                                              else "EXHAUSTIVE")
+                            attempted_cuda_algorithms.add(cuda_algorithm)
+                            log("Đang thử cấu hình CUDA tương thích hơn cho model này…")
+                            session, provider = create_inference_session(
+                                opts.model, opts.device, log, on_device,
+                                cuda_algorithm=cuda_algorithm)
+                        else:
+                            log("Thử lại ảnh này trên CPU; các ảnh còn lại sẽ tiếp tục trên CPU.")
+                            session, provider = create_inference_session(
+                                opts.model, "cpu", log, on_device, cpu_fallback=True)
+                        image_processor = create_image_processor(
+                            opts.model, provider, opts.device, log, on_device)
+                    if image_processor is not None:
+                        image_processor.release_cache()
                 result.save(dst)
                 log(f"[{idx}/{len(images)}] OK  {src.name}  ->  {dst.name}")
                 ok += 1
             except Exception as e:
+                if session is None:
+                    # Never let rembg silently create an uncontrolled default session.
+                    raise RuntimeError(f"Không khởi tạo lại được bộ xử lý: {e}") from e
                 log(f"[{idx}/{len(images)}] LỖI {src.name}: {e}")
                 failed += 1
 
@@ -587,6 +796,9 @@ def main():
     except FileNotFoundError as e:
         print(f"[!] {e}")
         sys.exit(0)
+    except RuntimeError as e:
+        print(f"[LỖI] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

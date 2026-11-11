@@ -2,8 +2,10 @@
 # Cài: python3 -m pip install -r requirements.txt
 
 rembg>=2.0.77          # tách nền bằng AI (kéo theo onnxruntime)
-numpy>=2.0
+numpy>=2.0,<2.6        # CuPy 14 dùng cùng NumPy với bộ chạy CPU
 pillow>=10.0
 
-onnxruntime>=1.17      # ghi rõ để chắc chắn có bản CPU, chạy được cả Intel lẫn Apple Silicon
+onnxruntime>=1.26      # CPU dự phòng; GPU được tự chuẩn bị riêng bởi gpu_runtime.py
 pymatting>=1.1         # chỉ cần khi dùng cờ --matting
+
+-r requirements-ui.txt # giao diện Qt Quick
